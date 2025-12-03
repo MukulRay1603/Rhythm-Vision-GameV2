@@ -41,8 +41,8 @@ Face Hero uses a hybrid detection + tracking pipeline:
 - Used for comparisons
 
 #### **CorrelationTrackerManager (CSRT/KCF)**
-Yes — this is implemented and used.  
-The system runs:
+ 
+*The system runs:*
 - CSRT / KCF correlation trackers between detection frames
 - Reinitializes trackers on detection cycles
 - Maintains stable bounding boxes & trails
@@ -51,23 +51,23 @@ The system runs:
 This produces smooth real-time bounding boxes even when MediaPipe isn't running every frame.
 
 ### 3. **Motion Extraction**
-From each tracked face:
+*From each tracked face:*
 - **dx** → horizontal movement → MOVE LEFT/RIGHT  
 - **dz** → size change (depth) → LEAN IN/OUT  
 - Both smoothed using exponential moving averages
 
 ### 4. **Head Pose Estimation**
-Based on MediaPipe keypoints:
+*Based on MediaPipe keypoints:*
 - **yaw** → TURN LEFT/RIGHT  
 - **pitch** → TILT UP/DOWN  
 
 ### 5. **Hand Gesture Recognition**
-Using MediaPipe Hands:
+*Using MediaPipe Hands:*
 - **WAVE** → lateral wrist movement  
 - **CLAP** → wrists close together  
 - **HANDS UP** → wrists above head region
 
-Gestures override face movement when triggered.
+*Gestures override face movement when triggered.*
 
 ---
 
@@ -93,7 +93,7 @@ Gestures override face movement when triggered.
 - Voice prompts for actions  
 
 ### Data Logging
-Every frame logs:
+*Every frame logs:*
 - face ID  
 - centroid  
 - bounding box  
