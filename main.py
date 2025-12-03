@@ -437,7 +437,13 @@ def main() -> None:
                     hand_results = hands_ctx.process(frame_rgb)
                     if hand_results.multi_hand_landmarks:
                         gesture_performed = detect_hand_gestures(
-                            hand_results.multi_hand_landmarks, W, H, hand_state, now, boxes
+                            hand_results.multi_hand_landmarks,
+                            hand_results.multi_handedness,
+                            W,
+                            H,
+                            hand_state,
+                            now,
+                            boxes,
                         )
 
                 # HUD
@@ -512,9 +518,9 @@ def main() -> None:
                             performed = "MOVE LEFT"
                         elif norm_dx > 0.14:
                             performed = "MOVE RIGHT"
-                        elif norm_dz > 0.14:
+                        elif norm_dz > 0.10:
                             performed = "LEAN IN"
-                        elif norm_dz < -0.14:
+                        elif norm_dz < -0.10:
                             performed = "LEAN BACK"
 
                         # head pose only if not already classified and not moving too much
@@ -523,9 +529,9 @@ def main() -> None:
                             pitch_deg = -pitch_deg  # flip for mirrored UX
 
                             if abs(norm_dx) < 0.08 and abs(norm_dz) < 0.08:
-                                if yaw_deg < -22:
+                                if yaw_deg < -18:
                                     performed = "TURN LEFT"
-                                elif yaw_deg > 22:
+                                elif yaw_deg > 18:
                                     performed = "TURN RIGHT"
                                 elif pitch_deg < -22:
                                     performed = "TILT UP"
@@ -680,25 +686,64 @@ def main() -> None:
 # ----------------- HAND GESTURES -----------------
 
 
+
 def detect_hand_gestures(
     multi_hand_landmarks,
+    multi_handedness,
     W: int,
     H: int,
     state: dict,
     now: float,
     boxes: Dict[int, np.ndarray],
 ):
-    """Detect WAVE, CLAP, HANDS UP with cooldown to avoid spam + MISS after action."""
+    """Detect WAVE, CLAP, HANDS UP with smoothing, handedness and medium sensitivity."""
     # global cooldown after a gesture
     if now < state.get("gesture_cooldown_until", 0.0):
         return None
 
-    hands = []
-    for lm in multi_hand_landmarks:
-        coords = [(p.x * W, p.y * H) for p in lm.landmark]
-        hands.append(coords)
+    # Prepare storage for left/right hands
+    wrists = {}
+    centers = {}
 
-    # approximate face zone
+    # Build per hand data using handedness
+    if multi_handedness is not None:
+        for lm, handed in zip(multi_hand_landmarks, multi_handedness):
+            label = handed.classification[0].label if handed.classification else "Unknown"
+            # Normalize label to simple "Left"/"Right" if possible
+            if "left" in label.lower():
+                key = "Left"
+            elif "right" in label.lower():
+                key = "Right"
+            else:
+                key = label
+
+            coords = [(p.x * W, p.y * H) for p in lm.landmark]
+            wrist = coords[0]
+            center = coords[9]  # around middle finger base
+
+            # Simple smoothing for wrists
+            prev = state.get(f"prev_wrist_{key}")
+            if prev is not None:
+                alpha = 0.6
+                wrist = (
+                    alpha * prev[0] + (1 - alpha) * wrist[0],
+                    alpha * prev[1] + (1 - alpha) * wrist[1],
+                )
+            state[f"prev_wrist_{key}"] = wrist
+
+            wrists[key] = wrist
+            centers[key] = center
+    else:
+        # Fallback: no handedness, approximate using order
+        for idx, lm in enumerate(multi_hand_landmarks):
+            key = "Hand" + str(idx)
+            coords = [(p.x * W, p.y * H) for p in lm.landmark]
+            wrist = coords[0]
+            center = coords[9]
+            wrists[key] = wrist
+            centers[key] = center
+
+    # approximate face zone from largest face box
     face_boxes = list(boxes.values())
     face_y_top = None
     face_y_bottom = None
@@ -708,48 +753,77 @@ def detect_hand_gestures(
         face_y_top = fy
         face_y_bottom = fy + fh
 
-    # ---- CLAP + HANDS UP: need two hands ----
-    if len(hands) >= 2:
-        l_idx = hands[0][8]
-        r_idx = hands[1][8]
-        dist = math.hypot(l_idx[0] - r_idx[0], l_idx[1] - r_idx[1])
+    # ---------------- CLAP + HANDS UP: require both hands ----------------
+    if "Left" in wrists and "Right" in wrists:
+        l_wrist = wrists["Left"]
+        r_wrist = wrists["Right"]
 
-        # CLAP: fingertips close together horizontally & vertically
-        if dist < W * 0.08 and now - state.get("last_clap_time", 0.0) > 0.8:
+        # CLAP: wrists close in space, moderate sensitivity
+        dist = math.hypot(l_wrist[0] - r_wrist[0], l_wrist[1] - r_wrist[1])
+        if (
+            dist < W * 0.16
+            and abs(l_wrist[1] - r_wrist[1]) < H * 0.12
+            and now - state.get("last_clap_time", 0.0) > 0.7
+        ):
             state["last_clap_time"] = now
-            state["gesture_cooldown_until"] = now + 0.45
+            state["gesture_cooldown_until"] = now + 0.5
             return "CLAP"
 
-        l_wrist = hands[0][0]
-        r_wrist = hands[1][0]
+        # HANDS UP: both wrists clearly above face zone (or mid screen if no face)
         if face_y_top is not None and face_y_bottom is not None:
-            zone_top = max(0, face_y_top - (face_y_bottom - face_y_top) * 0.4)
+            zone_top = max(0, face_y_top - (face_y_bottom - face_y_top) * 0.10)
         else:
             zone_top = H * 0.45
 
-        # HANDS UP: both wrists clearly above face zone
         if (
             l_wrist[1] < zone_top
             and r_wrist[1] < zone_top
             and now - state.get("last_handsup_time", 0.0) > 0.8
         ):
             state["last_handsup_time"] = now
-            state["gesture_cooldown_until"] = now + 0.45
+            state["gesture_cooldown_until"] = now + 0.6
             return "HANDS UP"
 
-    # ---- WAVE: strong horizontal motion of any hand over short time ----
-    history = state["hand_history"]
-    for coords in hands:
-        center = coords[9]  # middle finger MCP-ish
-        history.append((now, center[0]))
-    history[:] = [h for h in history if now - h[0] < 0.5]
+    # ---------------- WAVE: oscillatory horizontal motion ----------------
+    # We keep per hand wave history in state["wave_history"]
+    wave_hist = state.setdefault("wave_history", {"Left": [], "Right": []})
+    window = 0.7  # seconds of history
 
-    if len(history) >= 2:
-        xs = [h[1] for h in history]
-        min_x, max_x = min(xs), max(xs)
-        if max_x - min_x > W * 0.18 and now - state.get("last_wave_time", 0.0) > 0.8:
+    for key, center in centers.items():
+        xs = wave_hist.setdefault(key, [])
+        xs.append((now, center[0]))
+        # keep recent window
+        wave_hist[key] = [(t, x) for (t, x) in xs if now - t < window]
+
+    # Check each hand for oscillation
+    for key, xs in wave_hist.items():
+        if len(xs) < 3:
+            continue
+        times = [t for (t, _) in xs]
+        x_vals = [x for (_, x) in xs]
+        min_x, max_x = min(x_vals), max(x_vals)
+        total_span = max_x - min_x
+
+        # Require a reasonable horizontal span
+        if total_span < W * 0.10:
+            continue
+
+        # Look at sign changes in dx (oscillation)
+        dxs = [x_vals[i + 1] - x_vals[i] for i in range(len(x_vals) - 1)]
+        # Remove very tiny dx to avoid noise
+        dxs = [d for d in dxs if abs(d) > W * 0.005]
+        if len(dxs) < 2:
+            continue
+
+        sign_changes = 0
+        for i in range(len(dxs) - 1):
+            if dxs[i] * dxs[i + 1] < 0:
+                sign_changes += 1
+
+        # For a proper wave, require at least one sign flip
+        if sign_changes >= 1 and now - state.get("last_wave_time", 0.0) > 0.8:
             state["last_wave_time"] = now
-            state["gesture_cooldown_until"] = now + 0.45
+            state["gesture_cooldown_until"] = now + 0.6
             return "WAVE"
 
     return None
