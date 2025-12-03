@@ -8,6 +8,9 @@ All motion is tracked live using custom face-tracking pipelines, smoothing filte
 
 This repo showcases a complete real-time vision-powered game system.
 
+[![Watch the demo]]([https://drive.google.com/file/d/FILE_ID/view?usp=sharing](https://drive.google.com/file/d/1pyu8bpDnGsdfxoNMzEo-Ct6Bdwmroypk/view?usp=drive_link))
+
+
 ---
 
 ## 🚀 What Is Face Hero?
