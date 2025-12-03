@@ -40,7 +40,7 @@ BEAT_INTERVAL = 60.0 / BPM
 PROMPT_BEATS = 4  # beats before auto-changing prompt if idle
 
 MASTER_VOLUME = 0.8
-BGM_VOLUME = 0.45
+BGM_VOLUME = 0.6
 BGM_ULT_VOLUME = 0.85
 SFX_VOLUME = 0.9
 VOICE_VOLUME = 0.9
@@ -399,7 +399,9 @@ def main() -> None:
                     results = fd.process(frame_rgb)
                     if results.detections:
                         for det in results.detections:
-                            raw_detections.append(det)
+                            score = float(det.score[0]) if det.score else 1.0
+                            if score < 0.6:
+                                continue
                             bbox = det.location_data.relative_bounding_box
                             x = int(bbox.xmin * W)
                             y = int(bbox.ymin * H)
@@ -409,17 +411,15 @@ def main() -> None:
                             y = max(0, min(y, H - 1))
                             w = max(1, min(w, W - x))
                             h = max(1, min(h, H - y))
-                            # Anti-ghost filtering: ignore tiny or far-away faces
+
+                            # Anti-ghost filtering: ignore tiny faces near edges
                             if w < 80 or h < 80:
                                 continue
                             if x < 40 or x + w > W - 40:
                                 continue
+
+                            raw_detections.append(det)
                             detections.append(np.array([x, y, w, h], dtype=float))
-
-
-                # Keep only the largest detected face to avoid ghost/background boxes
-                if len(detections) > 1:
-                    detections = [max(detections, key=lambda b: b[2] * b[3])]
 
                 if USE_CORRELATION_TRACKER and corr_tracker is not None:
                     if run_detection_this_frame:
@@ -507,14 +507,14 @@ def main() -> None:
                         norm_dx = dx / max(40.0, w)
                         norm_dz = dz / max(40.0, size_scalar)
 
-                        # face motion thresholds (more stable)
+                        # face motion thresholds (more stable, lean slightly more sensitive)
                         if norm_dx < -0.14:
                             performed = "MOVE LEFT"
                         elif norm_dx > 0.14:
                             performed = "MOVE RIGHT"
-                        elif norm_dz > 0.18:
+                        elif norm_dz > 0.14:
                             performed = "LEAN IN"
-                        elif norm_dz < -0.18:
+                        elif norm_dz < -0.14:
                             performed = "LEAN BACK"
 
                         # head pose only if not already classified and not moving too much
@@ -604,8 +604,9 @@ def main() -> None:
                         audio_mgr.play_voice_for_prompt(current_prompt, now)
 
                     elif performed is not None and performed != prompt_for_frame and not locked:
-                        # only penalize if we actually had a combo running
-                        if combos[fid] > 0:
+                        # only penalize if we actually had a combo running, and rate-limit MISS spam
+                        last_miss = getattr(motion_state, "last_miss_time", 0.0)
+                        if combos[fid] >= 2 and (now - last_miss) > 0.8:
                             floating_texts.append(
                                 FloatingText(
                                     text="MISS",
@@ -617,6 +618,7 @@ def main() -> None:
                                 )
                             )
                             audio_mgr.play_sfx("sfx_miss")
+                            motion_state.last_miss_time = now
                         combos[fid] = 0
 
                     # logging per face
